@@ -71,7 +71,8 @@ The available voices ship inside the checkpoint as `voice_embedding/*.pt` files.
 from your downloaded snapshot:
 
 ```bash
-ls "$(hf download mistralai/Voxtral-4B-TTS-2603)/voice_embedding"
+MODEL_PATH="$(hf download mistralai/Voxtral-4B-TTS-2603 --quiet)"
+ls "${MODEL_PATH}/voice_embedding"
 ```
 
 #### Python
@@ -126,8 +127,8 @@ for a full Python raw PCM consumer.
 | `response_format` | `wav` | Output container (`wav`, `mp3`, `flac`, `opus`, `aac`, `pcm`) |
 | `stream` | `false` | Stream raw PCM audio chunks |
 
-> Voxtral generation is **deterministic**: the engine fixes `temperature` to `0.0`, so sampling
-> parameters such as `top_p`, `top_k`, and `temperature` are not used. Reference-clip voice
+> Voxtral generation is **deterministic**: the engine fixes `temperature` to `0.0`, so a request
+> that sets `temperature`, `top_p`, `top_k`, `repetition_penalty` or `seed` is rejected. Reference-clip voice
 > cloning (`references`) is **not** supported for Voxtral — use a preset `voice` instead.
 
 ## Benchmark Results

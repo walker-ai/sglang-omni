@@ -17,6 +17,28 @@ then download the model:
 hf download FunAudioLLM/Fun-ASR-Nano-2512-hf
 ```
 
+## Apple Silicon
+
+Fun-ASR runs on Apple Silicon through a Torch/MPS compatibility path. Install
+with the [Apple Silicon installer](../get_started/installation.md#-option-b-macos-apple-silicon-installer)
+and follow its environment-activation and `DYLD_LIBRARY_PATH` steps; TorchCodec
+needs Homebrew's keg-only FFmpeg libraries on the path before the server starts.
+
+Use the official `FunAudioLLM/Fun-ASR-Nano-2512-hf` checkpoint with unquantized
+BF16 weights; no converted artifact is needed.
+Inference runs one request at a time and additional requests queue. Use
+`temperature=0` and upload audio segments no longer than 30 seconds. JSON and
+SSE transcription are supported; quantized checkpoints are not.
+
+### Torch/MPS
+
+Native MLX support is added separately; until then, set `SGLANG_USE_MLX=0`:
+
+```bash
+SGLANG_USE_MLX=0 sgl-omni serve \
+  --model-path FunAudioLLM/Fun-ASR-Nano-2512-hf --port 8000
+```
+
 ## Server Configuration
 
 Fun-ASR-Nano runs a single ASR stage on one GPU.
@@ -152,7 +174,7 @@ concurrency 32:
 | 32 | 167.42 | 0.190 | 0.264 | 0.0410 | 784 |
 | 64 | 165.75 | 0.381 | 0.475 | 0.0825 | 776 |
 
-A single worker sheds requests with HTTP 500 by design once the
+A single worker sheds requests with HTTP 503 by design once the
 request-build backlog is full; the current default admits at most 32 pending
 builds per worker. Under the pre-coalescing defaults above (16 pending
 builds) that cost roughly 2 to 5 percent of requests at concurrency 64.
@@ -165,10 +187,11 @@ topology.
 - The endpoint accepts one uploaded file per request.
 - Each uploaded audio segment must be 30 seconds or shorter, matching the
   official Fun-ASR VAD segment limit. Split longer recordings before upload.
-- `itn` and `hotwords` are supported by the model request builder but not
-  exposed as form fields on the public transcription endpoint.
-- `prompt` is accepted by the HTTP endpoint for OpenAI compatibility, but
-  Fun-ASR-Nano currently ignores it (use `hotwords` inside the builder for
-  context biasing instead).
+- `prompt` carries context biasing: a comma-separated list of terms likely to
+  appear in the audio (names, jargon). Each term becomes a hotword in the
+  model's prompt. Biasing raises the model's preference for the supplied
+  terms; it does not force them, and an irrelevant list can hurt accuracy.
+- `itn` and explicit `hotwords` remain available to in-process callers of the
+  request builder; explicit `hotwords` take precedence over `prompt`.
 - Audio is resampled to 16 kHz before transcription.
 - bf16 is strongly recommended; fp16 can overflow to NaN in the adaptor path.

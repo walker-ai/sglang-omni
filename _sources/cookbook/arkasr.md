@@ -116,6 +116,31 @@ resp.raise_for_status()
 print(resp.json()["text"])
 ```
 
+## Stream Transcription
+
+Set the multipart `stream` field to `true` and keep `response_format` as
+`json` or `text` to receive Server-Sent Events (SSE):
+
+```bash
+curl -N -X POST http://localhost:8000/v1/audio/transcriptions \
+  -F model=AutoArk-AI/ARK-ASR-3B \
+  -F file=@tests/data/query_to_cars.wav \
+  -F language=en \
+  -F response_format=json \
+  -F stream=true
+```
+
+The response contains zero or more `transcript.text.delta` events, followed
+by one `transcript.text.done` event with the complete post-processed
+transcript, then `data: [DONE]`. Streaming primarily reduces time to first
+text; it does not change the final transcript.
+
+Treat `transcript.text.done` as the authoritative transcript: it is the same
+post-processed string as the non-stream `text` field. Incremental
+`transcript.text.delta` events are a live preview. Concatenating them may
+differ from `done` by leading or trailing whitespace (the final adapter
+`.strip()`s the full decode). Persist `done.text`, not `"".join(deltas)`.
+
 ## Request Parameters
 
 | Parameter | Type | Default | Description |
@@ -124,6 +149,7 @@ print(resp.json()["text"])
 | `model` | string | server default | Model identifier |
 | `language` | string | `en` | Language hint recorded on the request. The transcription instruction is a fixed English prompt (`Please transcribe this audio.`); ARK-ASR auto-detects the spoken language, so this field does not switch prompt templates. |
 | `response_format` | string | `json` | `json`, `verbose_json`, or `text` |
+| `stream` | boolean | `false` | Emit SSE text deltas. Streaming accepts only `json` or `text` response formats |
 | `temperature` | float | `0` (greedy) | Sampling temperature. When unset or `0`, SGLang's sampling normalization selects greedy decoding (`top_k=1`); no non-zero temperature is substituted. |
 
 ### Response Formats
@@ -167,6 +193,27 @@ audio's duration cannot be probed, `duration` and the segment end time are `0.0`
 - A `float16` path is also exposed. The encoder layers clamp the post-residual
   activations under fp16 (matching the reference `modeling_audio.py`) so large
   activations stay finite; this clamp is a no-op under `bfloat16`.
+
+## Apple Silicon
+
+On macOS arm64, ARK-ASR-3B runs through the existing Torch/MPS compatibility
+path without a converted checkpoint or model-specific code changes. Leave
+`SGLANG_USE_MLX` unset:
+
+```bash
+unset SGLANG_USE_MLX
+export DYLD_LIBRARY_PATH="$(brew --prefix ffmpeg@7)/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+sgl-omni serve \
+  --model-path AutoArk-AI/ARK-ASR-3B \
+  --model-name AutoArk-AI/ARK-ASR-3B \
+  --asr.engine.max_running_requests 1 \
+  --port 8000
+```
+
+This path was validated on a MacBook Air with an M4 and 16 GB of unified
+memory using the official checkpoint and `tests/data/query_to_cars.wav`. The
+server returned the expected transcript through `/v1/audio/transcriptions`.
+Set `SGLANG_USE_MLX=1` to select the native MLX path.
 
 ## Marker-Token Suppression
 
@@ -227,6 +274,32 @@ not change peak encoder activation memory.
 construction; encoder concurrency and backpressure are owned by the separate
 pre-LM queue.
 
+## Encoder CUDA Graph
+
+The audio encoder CUDA Graph is enabled by default. At startup it captures
+batch buckets derived from `encoder_max_batch_size` (powers of two, plus the
+limit itself; the default of 8 yields `1/2/4/8`) and mel-frame buckets in
+64-frame steps up to about 10 s (1024 frames). Longer clips, any uncaptured
+bucket, and a failed capture or replay use the eager encoder; requests never
+trigger capture.
+
+The graphs are captured after SGLang's generation CUDA graphs and before the
+pre-LM encoder service. To profile eager encoder execution:
+
+```bash
+sgl-omni serve --model-path AutoArk-AI/ARK-ASR-3B \
+  --asr.factory.enable_encoder_cuda_graph false
+```
+
+Or in a pipeline config:
+
+```yaml
+stages:
+  asr:
+    factory:
+      enable_encoder_cuda_graph: false
+```
+
 ## Benchmarking
 
 Use `benchmarks/eval/benchmark_asr_seedtts.py` to sweep ASR concurrency on
@@ -235,12 +308,26 @@ SeedTTS reference audio through `/v1/audio/transcriptions`. Pass
 `benchmarks.tasks.asr`.
 
 ```bash
+# Download the test set once:
+python -m benchmarks.dataset.prepare --dataset seedtts
+
+# Launch ARK-ASR:
 sgl-omni serve --model-path AutoArk-AI/ARK-ASR-3B --port 8000
 
 # Sweep the full SeedTTS EN set (1088 clips) at 1..64 concurrency, 3 repeats:
 python -m benchmarks.eval.benchmark_asr_seedtts \
   --port 8000 --model-path AutoArk-AI/ARK-ASR-3B \
   --concurrencies 1,2,4,8,16,32,64 --repeats 3 --warmup
+
+# Quick smoke on a 20-sample subset:
+python -m benchmarks.eval.benchmark_asr_seedtts \
+  --port 8000 --model-path AutoArk-AI/ARK-ASR-3B \
+  --max-samples 20 --concurrencies 2 --repeats 1
+
+# Measure text TTFT and inter-chunk latency through the SSE endpoint:
+python -m benchmarks.eval.benchmark_asr_seedtts \
+  --port 8000 --model-path AutoArk-AI/ARK-ASR-3B \
+  --max-samples 20 --concurrencies 2 --repeats 1 --stream
 ```
 
 The script reports corpus WER, throughput, and latency per concurrency level.
